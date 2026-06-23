@@ -1,0 +1,49 @@
+[package]
+name = "bitvanes-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme.workspace = true
+description = "Zero-trust ETL engine: parse, scrub, tokenize, chunk, and emit Apache Arrow columnar memory."
+
+[lib]
+crate-type = ["rlib"]
+
+# ---------------------------------------------------------------------------
+# Feature flags. See the phased build plan for the rationale behind each.
+# ---------------------------------------------------------------------------
+[features]
+default = []
+
+# Arrow IPC stream output (StreamWriter). Native-only.
+ipc = ["arrow/ipc"]
+
+# Arrow CSV output. Native-only.
+csv = ["arrow/csv"]
+
+# On-device embedding generation via ONNX Runtime. Native-only.
+embeddings = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow = { version = "59.0.0", default-features = false, features = ["ffi"] }
+ndarray = { version = "0.17", optional = true }
+ort = { version = "2.0.0-rc.12", optional = true }
+pulldown-cmark = "0.13.4"
+regex = "1.12"
+scraper = "0.27.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+tiktoken-rs = { version = "0.12.0", default-features = false }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
+
+[dev-dependencies]
