@@ -7,8 +7,9 @@
 //! # Zero-telemetry
 //!
 //! The vocab files are embedded at compile time by `tiktoken-rs` itself
-//! via `include_str!`. No network calls ever occur — this is the
-//! foundation of the zero-telemetry mandate.
+//! via `include_str!`. That crate contains no network code and exposes no
+//! feature to disable embedding, so zero-telemetry is unconditional in
+//! every build — it is not gated by a cargo feature.
 
 use tiktoken_rs::CoreBPE;
 
@@ -32,13 +33,13 @@ impl std::fmt::Debug for Tokenizer {
 
 impl Tokenizer {
     /// Returns a tokenizer of the requested kind, backed by a process-wide
-    /// singleton `CoreBPE`.
+    /// singleton `CoreBPE` whose vocab is embedded at compile time.
     ///
     /// # Errors
     ///
-    /// Returns [`BitVanesError::FeatureNotEnabled`] if the requested
-    /// tokenizer's vocab data is not available in this build. With the
-    /// default `embed-vocab` feature, all tokenizers are always available.
+    /// Currently always returns `Ok` (the embedded vocab is always
+    /// available). The `Result` is retained so future tokenizer backends
+    /// can fail without a breaking signature change.
     pub fn new(kind: TokenizerKind) -> Result<Self> {
         let bpe = match kind {
             TokenizerKind::Cl100kBase => tiktoken_rs::cl100k_base_singleton(),
@@ -95,6 +96,35 @@ impl Tokenizer {
         let offset = snap_to_char_boundary(text, prefix_bytes.len());
         // Recount tokens in the snapped prefix to get an exact count.
         let actual_tokens = self.bpe.encode_ordinary(&text[..offset]).len();
+        Ok((offset, actual_tokens))
+    }
+
+    /// Returns the `(byte_offset, token_count)` of a suffix of `text`
+    /// covering at most `n_tokens` tokens. This is the symmetric companion
+    /// to [`split_at_token_boundary`], used by the chunker to derive the
+    /// overlap tail of an already-emitted chunk.
+    ///
+    /// - `byte_offset` is the start of the suffix, snapped to a UTF-8
+    ///   character boundary. It is `0` when the whole text is within `n_tokens`.
+    /// - `token_count` is the exact token count of `text[byte_offset..]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitVanesError::InvalidInput`] if token decoding fails.
+    pub fn suffix_tokens(&self, text: &str, n_tokens: usize) -> Result<(usize, usize)> {
+        let tokens = self.bpe.encode_ordinary(text);
+        if tokens.len() <= n_tokens {
+            return Ok((0, tokens.len()));
+        }
+
+        let suffix_tokens = &tokens[tokens.len() - n_tokens..];
+        let suffix_bytes = self
+            .bpe
+            .decode_bytes(suffix_tokens)
+            .map_err(|e| BitVanesError::InvalidInput(format!("BPE decode failed: {e}")))?;
+
+        let offset = snap_to_char_boundary(text, text.len().saturating_sub(suffix_bytes.len()));
+        let actual_tokens = self.bpe.encode_ordinary(&text[offset..]).len();
         Ok((offset, actual_tokens))
     }
 }
@@ -202,5 +232,26 @@ mod tests {
     fn token_count_of_empty_text_is_zero() {
         let t = cl100k();
         assert_eq!(t.count(""), 0);
+    }
+
+    #[test]
+    fn suffix_tokens_returns_full_text_when_under_limit() {
+        let t = cl100k();
+        let text = "hello";
+        let (offset, count) = t.suffix_tokens(text, 100).unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(count, t.count(text));
+    }
+
+    #[test]
+    fn suffix_tokens_snaps_to_char_boundary_and_respects_cap() {
+        let t = cl100k();
+        let text = "héllo wörld тест тест more tokens here";
+        let n = 3;
+        let (offset, count) = t.suffix_tokens(text, n).unwrap();
+        assert!(text.is_char_boundary(offset), "must be a char boundary");
+        assert!(count <= n, "suffix token count {count} should be <= {n}");
+        assert!(offset > 0, "suffix should not start at 0");
+        assert_eq!(count, t.count(&text[offset..]));
     }
 }

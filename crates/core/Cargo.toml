@@ -27,8 +27,21 @@ ipc = ["arrow/ipc"]
 # Arrow CSV output. Native-only.
 csv = ["arrow/csv"]
 
+# Native PDF text extraction via `pdf-extract`. Native-only — the browser
+# extracts text via PDF.js in JavaScript before reaching the engine, so the
+# wasm build never enables this.
+cli-pdf = ["dep:pdf-extract"]
+
 # On-device embedding generation via ONNX Runtime. Native-only.
 embeddings = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
+# Rayon-based parallel batch processing. Native-only.
+parallel = ["dep:rayon"]
+
+# NOTE on `embed-vocab`: BPE vocab is embedded at compile time *unconditionally*
+# by `tiktoken-rs` (which `include_str!`s its assets and contains no network
+# code). Zero-telemetry is therefore always on and not a feature toggle. There
+# is intentionally no `embed-vocab` feature here.
 
 [lints]
 workspace = true
@@ -37,7 +50,9 @@ workspace = true
 arrow = { version = "59.0.0", default-features = false, features = ["ffi"] }
 ndarray = { version = "0.17", optional = true }
 ort = { version = "2.0.0-rc.12", optional = true }
+pdf-extract = { version = "0.10", optional = true }
 pulldown-cmark = "0.13.4"
+rayon = { version = "1", optional = true }
 regex = "1.12"
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }

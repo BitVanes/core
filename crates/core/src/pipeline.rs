@@ -63,6 +63,63 @@ pub fn run_pipeline_with_embeddings(
     Ok(batch)
 }
 
+/// Runs [`run_pipeline`] over many inputs, in parallel when the `parallel`
+/// feature is enabled and sequentially otherwise. Returns one result per
+/// input so a single failing document does not abort the batch.
+///
+/// # Errors
+///
+/// Each element of the returned `Vec` propagates the per-input error
+/// independently; an `Ok` element is a fully assembled `RecordBatch`.
+pub fn run_pipeline_batch(inputs: &[&[u8]], cfg: &PipelineConfig) -> Vec<Result<RecordBatch>> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        inputs.par_iter().map(|b| run_pipeline(b, cfg)).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        inputs.iter().map(|b| run_pipeline(b, cfg)).collect()
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crate::schema::{ChunkConfig, DocumentFormat};
+
+    #[test]
+    fn batch_processes_multiple_inputs() {
+        let cfg = PipelineConfig {
+            format: DocumentFormat::Text,
+            chunk: ChunkConfig {
+                max_tokens: 512,
+                ..ChunkConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let inputs: Vec<&[u8]> = vec![b"first document", b"second document", b"third"];
+        let results = run_pipeline_batch(&inputs, &cfg);
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(r.is_ok(), "batch element failed: {:?}", r.as_ref().err());
+            assert!(r.as_ref().unwrap().num_rows() > 0);
+        }
+    }
+
+    #[test]
+    fn batch_isolates_per_input_failures() {
+        let cfg = PipelineConfig {
+            format: DocumentFormat::Pdf, // unresolvable without cli-pdf in tests
+            ..PipelineConfig::default()
+        };
+        let inputs: Vec<&[u8]> = vec![b"not pdf", b"also not pdf"];
+        let results = run_pipeline_batch(&inputs, &cfg);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(std::result::Result::is_err));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

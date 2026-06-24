@@ -20,8 +20,12 @@
 //!
 //! # Overlap
 //!
-//! `overlap_tokens > 0` is accepted by the config but not yet implemented.
-//! The chunker asserts `overlap_tokens == 0` for now.
+//! `overlap_tokens > 0` repeats the last `overlap_tokens` of each chunk at
+//! the start of the next, including across oversized spans (spans larger
+//! than `max_tokens`): the tail of the chunk before an oversized span is
+//! prepended to the oversized span's first sub-chunk, and each oversized
+//! sub-chunk overlaps the next. `overlap_tokens` must be strictly less
+//! than `max_tokens`.
 
 use crate::error::{BitVanesError, Result};
 use crate::parse::{Document, offset_to_u32};
@@ -62,20 +66,26 @@ pub fn chunk_document(
         let span_tokens = tokenizer.count(span_text);
 
         if span_tokens > max_tokens {
+            // Carry the previous chunk's overlap tail into the first
+            // oversized sub-chunk so the overlap chain is not broken.
+            let prefix = if overlap > 0 && accum.is_nonempty() {
+                let records = accum.take_overlap(overlap);
+                overlap_prefix_from_records(doc, &records)
+            } else {
+                OverlapPrefix::default()
+            };
             if accum.is_nonempty() {
-                let overlap_spans = if overlap > 0 {
-                    accum.take_overlap(overlap)
-                } else {
-                    Vec::new()
-                };
                 chunks.push(accum.finish(doc, &source));
-                accum = ChunkAccum::from_overlap(&overlap_spans);
-                if accum.is_nonempty() && !accum.try_add(span, span_tokens, max_tokens) {
-                    chunks.push(accum.finish(doc, &source));
-                    accum = ChunkAccum::default();
-                }
             }
-            split_oversized_span(doc, span, &tokenizer, max_tokens, &source, &mut chunks)?;
+            accum = ChunkAccum::default();
+            let ctx = SplitCtx {
+                doc,
+                tokenizer: &tokenizer,
+                max_tokens,
+                overlap,
+                source: &source,
+            };
+            split_oversized_span(&ctx, span, &prefix, &mut chunks)?;
         } else if accum.try_add(span, span_tokens, max_tokens) {
         } else {
             let overlap_spans = accum.take_overlap(overlap);
@@ -110,6 +120,15 @@ fn validate_config(cfg: &ChunkConfig) -> Result<()> {
             "max_tokens must be greater than zero".to_string(),
         ));
     }
+    if cfg.max_tokens > u32::from(u16::MAX) {
+        // Chunk token counts are emitted into a UInt16 column, so cap
+        // max_tokens to keep every chunk's count representable.
+        return Err(BitVanesError::InvalidConfig(format!(
+            "max_tokens ({}) must not exceed {} (token_count is a u16 column)",
+            cfg.max_tokens,
+            u16::MAX
+        )));
+    }
     if cfg.overlap_tokens >= cfg.max_tokens {
         return Err(BitVanesError::InvalidConfig(format!(
             "overlap_tokens ({}) must be less than max_tokens ({})",
@@ -119,46 +138,119 @@ fn validate_config(cfg: &ChunkConfig) -> Result<()> {
     Ok(())
 }
 
-/// Splits an over-long span into sub-chunks, each respecting `max_tokens`.
-fn split_oversized_span(
-    doc: &Document,
-    span: &crate::parse::TextSpan,
-    tokenizer: &Tokenizer,
+/// Text carried from the end of one chunk to the start of the next so that
+/// adjacent chunks overlap by `overlap_tokens`.
+#[derive(Default, Clone)]
+struct OverlapPrefix {
+    text: String,
+    tokens: usize,
+    /// Absolute offset in `doc.full_text` where `text` begins.
+    abs_start: usize,
+}
+
+/// Builds an [`OverlapPrefix`] from accumulated span records by stitching
+/// their text out of the document buffer.
+fn overlap_prefix_from_records(doc: &Document, records: &[SpanRecord]) -> OverlapPrefix {
+    if records.is_empty() {
+        return OverlapPrefix::default();
+    }
+    let mut text = String::new();
+    for record in records {
+        text.push_str(&doc.full_text[record.start..record.end]);
+    }
+    let tokens: usize = records.iter().map(|r| r.tokens).sum();
+    OverlapPrefix {
+        text,
+        tokens,
+        abs_start: records[0].start,
+    }
+}
+
+/// Bundled arguments for [`split_oversized_span`] to keep its arity low.
+struct SplitCtx<'a> {
+    doc: &'a Document,
+    tokenizer: &'a Tokenizer,
     max_tokens: usize,
-    source: &str,
+    overlap: usize,
+    source: &'a str,
+}
+
+/// Splits an over-long span into sub-chunks, each respecting `max_tokens`.
+///
+/// `initial_prefix` is the overlap tail of the preceding chunk (possibly
+/// empty); it is prepended to the first emitted sub-chunk. When `overlap`
+/// is non-zero, every sub-chunk after the first begins with the previous
+/// sub-chunk's tail. Overlap tails are always derived from span-internal
+/// slices so that absolute document offsets remain contiguous.
+fn split_oversized_span(
+    ctx: &SplitCtx,
+    span: &crate::parse::TextSpan,
+    initial_prefix: &OverlapPrefix,
     out: &mut Vec<ChunkSpec>,
 ) -> Result<()> {
+    let doc = ctx.doc;
+    let tokenizer = ctx.tokenizer;
+    let max_tokens = ctx.max_tokens;
+    let overlap = ctx.overlap;
+
     let full_text = span.text(doc);
-    let mut cursor = 0usize;
     let abs_base = span.char_offset_start as usize;
+    let mut cursor = 0usize;
+    let mut prefix = initial_prefix.clone();
 
     while cursor < full_text.len() {
         let remaining = &full_text[cursor..];
-        let (split_at, token_count) = tokenizer.split_at_token_boundary(remaining, max_tokens)?;
+        let budget = max_tokens.saturating_sub(prefix.tokens).max(1);
+        let (split_at, piece_tokens) = tokenizer.split_at_token_boundary(remaining, budget)?;
 
         if split_at == 0 {
-            // Safety valve: if the tokenizer returns 0 for a non-empty
-            // remaining, fail rather than risk an infinite loop.
             return Err(BitVanesError::InvalidInput(format!(
                 "tokenizer produced a zero-length split at byte {cursor} in a span of {} bytes",
                 full_text.len()
             )));
         }
 
+        let piece = &remaining[..split_at];
+        let piece_start = abs_base + cursor;
+        let total_tokens = prefix.tokens + piece_tokens;
+
+        let mut text = String::with_capacity(prefix.text.len() + piece.len());
+        let start_off = if prefix.tokens > 0 {
+            text.push_str(&prefix.text);
+            prefix.abs_start
+        } else {
+            piece_start
+        };
+        text.push_str(piece);
+        let end_off = piece_start + split_at;
+
         out.push(ChunkSpec {
             chunk_index: 0, // re-indexed by caller
-            text: remaining[..split_at].to_string(),
-            token_count: u16::try_from(token_count).map_err(|_| {
+            text,
+            token_count: u16::try_from(total_tokens).map_err(|_| {
                 BitVanesError::InvalidInput("token count overflowed u16".to_string())
             })?,
-            source_path: source.to_string(),
+            source_path: ctx.source.to_string(),
             heading_path: span.heading_path.clone(),
             section_kind: span.section_kind,
-            char_offset_start: offset_to_u32(abs_base + cursor),
-            char_offset_end: offset_to_u32(abs_base + cursor + split_at),
+            char_offset_start: offset_to_u32(start_off),
+            char_offset_end: offset_to_u32(end_off),
         });
 
         cursor += split_at;
+
+        // Carry this piece's tail into the next sub-chunk. Derived from the
+        // span-internal slice so offsets stay contiguous in the document.
+        if overlap > 0 && cursor < full_text.len() {
+            let (suffix_offset, suffix_tokens) = tokenizer.suffix_tokens(piece, overlap)?;
+            prefix = OverlapPrefix {
+                text: piece[suffix_offset..].to_string(),
+                tokens: suffix_tokens,
+                abs_start: piece_start + suffix_offset,
+            };
+        } else {
+            prefix = OverlapPrefix::default();
+        }
     }
 
     Ok(())
@@ -495,5 +587,57 @@ mod tests {
                 "chunk text must be a substring of the document"
             );
         }
+    }
+
+    #[test]
+    fn overlap_carries_across_oversized_span() {
+        // A normal span followed by a span large enough to require splitting.
+        let normal = "alpha beta gamma delta epsilon zeta ";
+        let oversized = "the quick brown fox jumps over the lazy dog repeatedly ".repeat(10);
+        let doc = make_doc(&[
+            (normal, SectionKind::Paragraph),
+            (&oversized, SectionKind::Paragraph),
+        ]);
+        let cfg_overlap = ChunkConfig {
+            max_tokens: 12,
+            overlap_tokens: 3,
+            tokenizer: TokenizerKind::Cl100kBase,
+        };
+        let chunks = chunk_document(&doc, &cfg_overlap, None).unwrap();
+        assert!(chunks.len() >= 3, "expected multiple chunks");
+
+        // Every adjacent pair must overlap: chunk[i+1] must begin with a
+        // non-empty char-aligned suffix of chunk[i]. This is the property
+        // that previously broke at the oversized-span boundary.
+        for w in chunks.windows(2) {
+            let (prev, next) = (&w[0].text, &w[1].text);
+            let mut best = 0;
+            let mut cut = 1;
+            while cut <= prev.len().min(next.len()) {
+                if prev.is_char_boundary(prev.len() - cut)
+                    && next.is_char_boundary(cut)
+                    && next.starts_with(&prev[prev.len() - cut..])
+                {
+                    best = cut;
+                }
+                cut += 1;
+            }
+            assert!(
+                best > 0,
+                "adjacent chunks must overlap\nprev: {prev:?}\nnext: {next:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_tokens_above_u16_max_is_rejected() {
+        let doc = make_doc(&[("hello", SectionKind::Paragraph)]);
+        let big = ChunkConfig {
+            max_tokens: u32::from(u16::MAX) + 1,
+            overlap_tokens: 0,
+            tokenizer: TokenizerKind::Cl100kBase,
+        };
+        let err = chunk_document(&doc, &big, None).unwrap_err();
+        assert!(matches!(err, BitVanesError::InvalidConfig(_)));
     }
 }

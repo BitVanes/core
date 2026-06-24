@@ -254,8 +254,16 @@ mod ort_embedder {
         let hidden_dim = view.shape()[2];
         let flat: Vec<f32> = view.iter().copied().collect();
 
-        // 6. Mean pool (attention-mask weighted)
-        let pooled = mean_pool(&flat, &attn_mask, hidden_dim.min(dim));
+        // The model emits `hidden_dim` per token; the caller's configured
+        // `dim` must match so the pooled vector fills the output column.
+        if hidden_dim != dim {
+            return Err(BitVanesError::InvalidConfig(format!(
+                "model hidden dimension ({hidden_dim}) does not match configured embedding dimension ({dim})"
+            )));
+        }
+
+        // 6. Mean pool (attention-mask weighted) over the true hidden dim.
+        let pooled = mean_pool(&flat, &attn_mask, hidden_dim);
 
         // 7. L2 normalize
         let mut result = pooled;

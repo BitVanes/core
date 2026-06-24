@@ -27,7 +27,7 @@ use crate::error::{BitVanesError, Result};
 ///
 /// Returns [`crate::error::BitVanesError::Arrow`] if serialization fails.
 pub fn write_csv(batch: &RecordBatch) -> Result<String> {
-    let flat = flatten_for_csv(batch);
+    let flat = flatten_for_csv(batch)?;
     let mut buffer = Vec::new();
     {
         let mut writer = WriterBuilder::new().build(&mut buffer);
@@ -43,7 +43,7 @@ pub fn write_csv(batch: &RecordBatch) -> Result<String> {
 ///
 /// See [`write_csv`].
 pub fn write_csv_no_header(batch: &RecordBatch) -> Result<String> {
-    let flat = flatten_for_csv(batch);
+    let flat = flatten_for_csv(batch)?;
     let mut buffer = Vec::new();
     {
         let mut writer = WriterBuilder::new().with_header(false).build(&mut buffer);
@@ -55,7 +55,7 @@ pub fn write_csv_no_header(batch: &RecordBatch) -> Result<String> {
 
 /// Builds a CSV-compatible `RecordBatch` by excluding nested-type columns
 /// that Arrow's CSV writer cannot handle (`List`, `FixedSizeList`).
-fn flatten_for_csv(batch: &RecordBatch) -> RecordBatch {
+fn flatten_for_csv(batch: &RecordBatch) -> Result<RecordBatch> {
     let schema = batch.schema();
     let mut fields = Vec::new();
     let mut columns = Vec::new();
@@ -67,8 +67,10 @@ fn flatten_for_csv(batch: &RecordBatch) -> RecordBatch {
         }
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-        .unwrap_or_else(|e| panic!("flatten_for_csv should not fail: {e}"))
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
 }
 
 /// Returns `true` if Arrow's CSV writer can serialize this data type.

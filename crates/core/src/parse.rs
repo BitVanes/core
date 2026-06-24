@@ -22,11 +22,13 @@
 //!
 //! ## PDF note
 //!
-//! [`DocumentFormat::Pdf`] is intentionally unimplemented here. The web PDF
-//! path runs through Mozilla PDF.js in JavaScript *before* reaching the
-//! engine; the extracted text arrives as [`DocumentFormat::Markdown`] or
-//! [`DocumentFormat::Text`]. Native PDF parsing lives behind the
-//! `cli-pdf` feature flag in a later phase.
+//! [`DocumentFormat::Pdf`] is binary, so it cannot go through the UTF-8
+//! string path. [`parse_bytes`] routes PDF bytes directly to the native
+//! `pdf` module (behind the `cli-pdf` feature) *before* attempting UTF-8
+//! decoding. When `cli-pdf` is not compiled in, PDF requests surface a
+//! [`BitVanesError::ParserUnavailable`]. The browser path instead extracts
+//! text via PDF.js in JavaScript and reaches the engine as
+//! [`DocumentFormat::Markdown`] or [`DocumentFormat::Text`].
 
 use crate::error::{BitVanesError, Result};
 use crate::schema::{DocumentFormat, PipelineConfig, SectionKind};
@@ -35,6 +37,9 @@ pub mod html;
 pub mod json;
 pub mod markdown;
 pub mod text;
+
+#[cfg(feature = "cli-pdf")]
+pub mod pdf;
 
 pub use html::HtmlParser;
 pub use json::JsonParser;
@@ -150,14 +155,30 @@ pub trait Parser {
 ///
 /// Returns [`BitVanesError::InvalidInput`] if the bytes are not valid UTF-8,
 /// or [`BitVanesError::ParserUnavailable`] if the requested format is not
-/// compiled into this build.
+/// compiled into this build (e.g. PDF without the `cli-pdf` feature).
 pub fn parse_bytes(bytes: &[u8], cfg: &PipelineConfig) -> Result<Document> {
+    // PDF is binary; route it to the native extractor before UTF-8 decoding.
+    #[cfg(feature = "cli-pdf")]
+    if cfg.format == DocumentFormat::Pdf {
+        return pdf::parse_pdf_bytes(bytes, cfg);
+    }
+    #[cfg(not(feature = "cli-pdf"))]
+    if cfg.format == DocumentFormat::Pdf {
+        return Err(BitVanesError::ParserUnavailable(
+            "pdf parsing requires the `cli-pdf` feature (native only)",
+        ));
+    }
+
     let input = std::str::from_utf8(bytes)
         .map_err(|e| BitVanesError::InvalidInput(format!("input is not valid UTF-8: {e}")))?;
     parse_str(input, cfg)
 }
 
 /// Like [`parse_bytes`] but accepts a string slice directly.
+///
+/// PDF cannot be parsed through this entry point because it requires raw
+/// bytes; a [`DocumentFormat::Pdf`] request here always returns
+/// [`BitVanesError::ParserUnavailable`].
 pub fn parse_str(input: &str, cfg: &PipelineConfig) -> Result<Document> {
     match cfg.format {
         DocumentFormat::Markdown => MarkdownParser.parse(input, cfg),
@@ -165,7 +186,7 @@ pub fn parse_str(input: &str, cfg: &PipelineConfig) -> Result<Document> {
         DocumentFormat::Html => HtmlParser.parse(input, cfg),
         DocumentFormat::Json => JsonParser.parse(input, cfg),
         DocumentFormat::Pdf => Err(BitVanesError::ParserUnavailable(
-            "pdf parsing requires the `cli-pdf` feature and a native target",
+            "pdf must be parsed from bytes via parse_bytes (binary format)",
         )),
     }
 }

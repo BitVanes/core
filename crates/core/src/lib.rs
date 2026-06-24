@@ -55,10 +55,16 @@ pub use parse::{
     Document, HtmlParser, JsonParser, MarkdownParser, Parser, TextParser, TextSpan, parse_bytes,
     parse_str,
 };
+pub use pipeline::{run_pipeline, run_pipeline_with_embeddings};
 pub use schema::{
     BuiltInPattern, ChunkConfig, ChunkSpec, CustomPattern, DocumentFormat, EmbeddingConfig,
     PipelineConfig, ScrubProfile, SectionKind, TokenizerKind,
 };
+
+#[cfg(feature = "embeddings")]
+pub use embed::OrtEmbedder;
+#[cfg(feature = "parallel")]
+pub use pipeline::run_pipeline_batch;
 
 /// Returns the semver version of the `bitvanes-core` crate, baked in at
 /// compile time via the `CARGO_PKG_VERSION` environment variable.

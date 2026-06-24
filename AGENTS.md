@@ -24,12 +24,14 @@ gzip -c crates/wasm/pkg/bitvanes_wasm_bg.wasm | wc -c
 
 ## Feature flags
 
-- `embed-vocab` (default): Embeds BPE vocab at compile time. Always on.
 - `ipc`: Arrow IPC stream writer. Native-only (CLI).
 - `csv`: Arrow CSV writer. Native-only.
 - `embeddings`: On-device embedding generation via ONNX Runtime (ort). Native-only.
-- `parallel`: Rayon multi-threading. Native-only.
-- `cli-pdf`: PDF parsing via pdf-extract. Native-only.
+- `parallel`: Rayon parallel batch (`run_pipeline_batch`). Native-only.
+- `cli-pdf`: Native PDF text extraction via pdf-extract. Native-only (browser uses PDF.js).
+
+BPE vocab embedding is **unconditional** (tiktoken-rs embeds it with no
+feature toggle), so there is no `embed-vocab` flag — every build is offline.
 
 Run tests with all features:
 
@@ -50,6 +52,6 @@ Interface). JS reads them using `arrow-js-ffi`'s `parseRecordBatch`.
 
 ## Toolchain
 
-- Rust 1.95+ (edition 2024), pinned via `rust-toolchain.toml`.
+- Rust stable (edition 2024), MSRV 1.85, pinned via `rust-toolchain.toml`.
 - `wasm-pack` 0.13+ for wasm builds.
 - `wasm32-unknown-unknown` target (auto-installed by rust-toolchain.toml).

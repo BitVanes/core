@@ -23,9 +23,9 @@ pub enum BitVanesError {
     #[error("invalid pipeline configuration: {0}")]
     InvalidConfig(String),
 
-    /// A requested feature was not compiled in (for example, the
-    /// `embed-vocab` feature is disabled and no fallback BPE source is
-    /// configured).
+    /// A requested optional feature was not compiled into this build (for
+    /// example, the `embeddings` feature is disabled but an embedding
+    /// config was supplied). Reserved for future gateable features.
     #[error("feature not enabled: {0}")]
     FeatureNotEnabled(&'static str),
 

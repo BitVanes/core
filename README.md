@@ -8,14 +8,16 @@ Zero-trust ETL engine for AI/RAG workloads. Written in Rust, compiled to both
 A four-stage pipeline that transforms raw documents into Apache Arrow
 columnar chunks ready for vector database ingestion:
 
-1. **Parse** - Markdown, HTML, or plain text into structural spans with
-  heading ancestry and section classification.
+1. **Parse** - Markdown, HTML, plain text, JSON, or PDF into structural spans
+  with heading ancestry and section classification. PDF requires the
+  `cli-pdf` feature natively; the browser extracts PDF text via PDF.js.
 2. **Scrub** - PII redaction (email, SSN, phone, credit card, API keys)
   via regex + Luhn validation, with an offset-delta map for projecting
   chunk positions back to the original document.
 3. **Chunk** - BPE-aware splitting at structural boundaries using any of
   six OpenAI tokenizers (`cl100k_base`, `o200k_base`, `r50k_base`,
-  `p50k_base`, `p50k_edit`, `o200k_harmony`).
+  `p50k_base`, `p50k_edit`, `o200k_harmony`), with optional overlap that
+  is preserved even across oversized spans.
 4. **Assemble** - Arrow `RecordBatch` with 9 columns (chunk_index, text,
   token_count, source_path, heading_path, section_kind, char offsets,
   embedding placeholder), exported via zero-copy FFI pointers.
@@ -41,8 +43,9 @@ core/
         tokenize.rs        BPE wrapper (tiktoken-rs)
         chunk.rs           structural-boundary chunker
         arrow_io/          batch.rs, ffi.rs, ipc.rs, csv.rs
-        pipeline.rs        full pipeline orchestration
+        pipeline.rs        full pipeline orchestration (+ run_pipeline_batch)
         embed.rs           Embedder trait (API foundation)
+        parse/pdf.rs       native PDF extractor (cli-pdf feature)
     wasm/                  bitvanes-wasm (thin #[wasm_bindgen] wrapper)
       src/lib.rs           process(), release_batch(), array_ptr(), schema_ptr()
 ```
@@ -81,12 +84,16 @@ release_batch(slotId);
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `embed-vocab` | yes | Embed BPE vocab files at compile time (zero telemetry) |
 | `ipc` | no | Arrow IPC stream output (`StreamWriter`) for CLI piping |
 | `csv` | no | Arrow CSV output for data export |
 | `embeddings` | no | On-device embedding generation via ONNX Runtime (`ort`) |
-| `parallel` | no | Rayon-based parallel processing (native only) |
-| `cli-pdf` | no | Native PDF parsing via pdf-extract (not in wasm) |
+| `parallel` | no | Rayon-based parallel batch processing (native only) |
+| `cli-pdf` | no | Native PDF text extraction via `pdf-extract` (not in wasm) |
+
+> **Zero-telemetry is unconditional.** BPE vocab is embedded at compile time
+> by `tiktoken-rs` (`include_str!`, no network code, no feature to disable
+> it), so every build is fully offline. There is intentionally no
+> `embed-vocab` feature.
 
 ## Output schema
 
@@ -108,7 +115,7 @@ When the `embeddings` feature is enabled, the pipeline can generate dense
 vector embeddings for each chunk using ONNX Runtime:
 
 ```rust
-use bitvanes_core::{OrtEmbedder, Embedder, pipeline::run_pipeline_with_embeddings};
+use bitvanes_core::{Embedder, OrtEmbedder, run_pipeline_with_embeddings};
 use std::path::Path;
 
 let embedder = OrtEmbedder::new(
