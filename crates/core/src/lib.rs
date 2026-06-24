@@ -55,10 +55,10 @@ pub use parse::{
     Document, HtmlParser, JsonParser, MarkdownParser, Parser, TextParser, TextSpan, parse_bytes,
     parse_str,
 };
-pub use pipeline::{run_pipeline, run_pipeline_with_embeddings};
+pub use pipeline::{run_pipeline, run_pipeline_with_embeddings, run_pipeline_with_strategy};
 pub use schema::{
-    BuiltInPattern, ChunkConfig, ChunkSpec, CustomPattern, DocumentFormat, EmbeddingConfig,
-    PipelineConfig, ScrubProfile, SectionKind, TokenizerKind,
+    BuiltInPattern, ChunkConfig, ChunkSpec, ChunkStrategy, CustomPattern, DocumentFormat,
+    EmbeddingConfig, PipelineConfig, ScrubProfile, SectionKind, TokenizerKind,
 };
 
 #[cfg(feature = "embeddings")]

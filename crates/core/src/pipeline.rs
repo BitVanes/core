@@ -7,11 +7,11 @@
 use arrow::array::RecordBatch;
 
 use crate::arrow_io::batch::{chunks_to_batch, chunks_to_batch_with_embeddings};
-use crate::chunk::chunk_document;
+use crate::chunk::{chunk_document, chunk_document_semantic};
 use crate::embed::Embedder;
 use crate::error::Result;
 use crate::parse::parse_bytes;
-use crate::schema::PipelineConfig;
+use crate::schema::{ChunkStrategy, PipelineConfig};
 use crate::scrub::scrub_document;
 
 /// Runs the full ETL pipeline on `bytes` and returns an Arrow
@@ -60,6 +60,36 @@ pub fn run_pipeline_with_embeddings(
     let dim = embedder.dim();
 
     let batch = chunks_to_batch_with_embeddings(&chunks, &embeddings, dim)?;
+    Ok(batch)
+}
+
+/// Like [`run_pipeline`] but honours [`ChunkStrategy::Semantic`]: when the
+/// config asks for semantic chunking, `embedder` guides where cuts happen.
+/// For [`ChunkStrategy::Structural`] the embedder is unused and this is
+/// equivalent to [`run_pipeline`].
+///
+/// # Errors
+///
+/// Propagates [`crate::error::BitVanesError`] from any stage or the embedder.
+pub fn run_pipeline_with_strategy(
+    bytes: &[u8],
+    cfg: &PipelineConfig,
+    embedder: &dyn Embedder,
+) -> Result<RecordBatch> {
+    let doc = parse_bytes(bytes, cfg)?;
+    let (scrubbed_doc, _offset_map) = scrub_document(doc, &cfg.scrub)?;
+    let chunks = match cfg.chunk.strategy {
+        ChunkStrategy::Structural => {
+            chunk_document(&scrubbed_doc, &cfg.chunk, cfg.source_label.as_deref())?
+        }
+        ChunkStrategy::Semantic { .. } => chunk_document_semantic(
+            &scrubbed_doc,
+            &cfg.chunk,
+            embedder,
+            cfg.source_label.as_deref(),
+        )?,
+    };
+    let batch = chunks_to_batch(&chunks)?;
     Ok(batch)
 }
 

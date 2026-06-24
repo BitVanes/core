@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// Identical JSON shape is consumed by both the wasm web worker and the
 /// native CLI - this is the wire format of the Milestone 4 `profile.json`
 /// exported by the visual studio.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PipelineConfig {
     /// Source document format. Selects the parser. Defaults to
     /// [`DocumentFormat::Markdown`] via the derived `Default` impl.
@@ -136,9 +136,34 @@ pub enum TokenizerKind {
     O200kHarmony,
 }
 
+/// How the chunker decides where to cut.
+///
+/// `Structural` packs spans greedily up to `max_tokens` at structural
+/// boundaries. `Semantic` additionally requires that consecutive spans stay
+/// above a cosine-similarity threshold so a chunk holds a single topical
+/// unit; cutting happens when the topic drifts *or* `max_tokens` is hit.
+///
+/// Note: this enum carries an `f32` threshold, so `ChunkConfig` and
+/// `PipelineConfig` implement `PartialEq` but not `Eq` as of 0.2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ChunkStrategy {
+    /// Greedy structural packing up to `max_tokens` (the original behaviour).
+    #[default]
+    Structural,
+    /// Embedding-guided merging. Adjacent spans are merged into the current
+    /// chunk while their cosine similarity to the running chunk centroid is
+    /// `>= similarity_threshold` *and* `max_tokens` is respected.
+    Semantic {
+        /// Minimum cosine similarity between a candidate span and the current
+        /// chunk's centroid to keep merging. Typical range 0.5–0.85.
+        similarity_threshold: f32,
+    },
+}
+
 /// Chunking parameters. All fields are validated by the engine at
 /// pipeline-start time; see [`crate::chunk`] for the enforcement site.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkConfig {
     /// Target maximum token count per chunk. The chunker saturates up to
     /// but never exceeds this value. Must be greater than zero.
@@ -146,12 +171,18 @@ pub struct ChunkConfig {
 
     /// Number of tokens of overlap between adjacent chunks. Defaults to
     /// zero (no overlap). Must be strictly less than `max_tokens`.
+    /// Overlap is honoured by [`ChunkStrategy::Structural`]; the semantic
+    /// strategy ignores it (treat as 0).
     #[serde(default)]
     pub overlap_tokens: u32,
 
     /// Which BPE tokenizer to apply.
     #[serde(default)]
     pub tokenizer: TokenizerKind,
+
+    /// How chunk boundaries are chosen. Defaults to structural packing.
+    #[serde(default)]
+    pub strategy: ChunkStrategy,
 }
 
 impl Default for ChunkConfig {
@@ -160,6 +191,7 @@ impl Default for ChunkConfig {
             max_tokens: 512,
             overlap_tokens: 0,
             tokenizer: TokenizerKind::default(),
+            strategy: ChunkStrategy::default(),
         }
     }
 }
@@ -326,6 +358,9 @@ mod tests {
                 max_tokens: 256,
                 overlap_tokens: 32,
                 tokenizer: TokenizerKind::O200kBase,
+                strategy: ChunkStrategy::Semantic {
+                    similarity_threshold: 0.75,
+                },
             },
             source_label: Some("docs/architecture.md".to_string()),
             embeddings: None,
@@ -379,10 +414,39 @@ mod tests {
     fn section_kind_all_covers_every_variant_without_dupes() {
         let all = SectionKind::all();
         assert_eq!(all.len(), 7, "expected exactly 7 SectionKind variants");
-        // Every variant must appear exactly once.
         for variant in all {
             let count = all.iter().filter(|&&v| v == *variant).count();
             assert_eq!(count, 1, "duplicate variant in SectionKind::all()");
         }
+    }
+
+    #[test]
+    fn chunk_strategy_round_trips_through_json() {
+        for original in [
+            ChunkStrategy::Structural,
+            ChunkStrategy::Semantic {
+                similarity_threshold: 0.82,
+            },
+        ] {
+            let json = serde_json::to_string(&original).expect("serialize");
+            let back: ChunkStrategy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                back, original,
+                "round-trip failed for {original:?} ({json})"
+            );
+        }
+        // Wire shape: lowercase variant, snake_case field.
+        let s = serde_json::to_string(&ChunkStrategy::Semantic {
+            similarity_threshold: 0.5,
+        })
+        .unwrap();
+        assert_eq!(s, r#"{"semantic":{"similarity_threshold":0.5}}"#);
+    }
+
+    #[test]
+    fn minimal_config_defaults_strategy_to_structural() {
+        let json = r#"{ "format": "markdown", "chunk": { "max_tokens": 128 } }"#;
+        let cfg: PipelineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.chunk.strategy, ChunkStrategy::Structural);
     }
 }
